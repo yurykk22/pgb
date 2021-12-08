@@ -1,0 +1,131 @@
+#!/bin/bash
+
+opt_err=0
+opt_C=0
+opt_F=0
+opt_L=0
+opt_Z=0
+cc=21
+incl=""
+excl=""
+remotehost=""
+SSH_KEY=""
+params=()
+
+ORIG_IFS=$IFS; IFS=""
+while [ -n "$1" ]
+do
+  case "$1" in
+    -C) opt_C=1;;
+    -F) opt_F=1;;
+    -L) opt_L=1;;
+    -Z) opt_Z="$2"; re='^[0-9]$'
+        if ! [[ $opt_Z =~ $re ]]; then echo "ERR: Неверно указана степень сжатия копии"; opt_err=1; fi
+        shift;;
+    -c) cc="$2"; re='^[0-9]+$'
+        if ! [[ $cc =~ $re ]]; then echo "ERR: Неверно указано количество хранимых копий"; opt_err=1; fi
+        shift;;
+    -i) incl="$2"; shift;;
+    -e) excl="$2"; shift;;
+    -r) remotehost="$2"; shift;;
+    -h) SSH_KEY="$2"; shift;;
+    -*) echo "Неизвестная опция $1"; opt_err=1;;
+    *) params+=( $1 );;
+  esac
+  shift
+done
+IFS=$ORIG_IFS
+
+LOGFILE="/var/log/pgb.log"
+
+date_format() {
+  echo $(date "+%Y-%m-%d-%H%M%S")
+}
+
+function wlog()
+{
+  while read text
+  do
+    echo "$text"
+    if [[ $opt_L -eq 0 ]]; then echo "$(date "+%Y-%m-%d %T") $text" >> $LOGFILE; fi
+  done
+}
+
+if [[ ${#params[*]} -ne 1 ]]; then echo "ERR: Неверно указаны параметры" | wlog; fi
+
+if [[ $opt_err -eq 1 ]] || [[ ${#params[*]} -ne 1 ]]
+then
+  echo
+  echo "Резервное копирование баз данных PostgreSQL"
+  echo
+  echo "Команда:"
+  echo "pgb [-C] [-L] [-Z <compress level>] [-c <countcopies>] [-r <remotehost>] [-h <identifyfile>] [-i \"<db1> [<db2>...[<dbN>]]\"] [-e \"<db1> [<db2>...[<dbN>]]\"] <backupdir>"
+  echo "-C Сжимать данные при передаче на удаленный хост"
+  echo "   Актуально для несжатых данных и низкоскоростных каналов передачи"
+  echo "-F Сохранить в специальном сжатом gzip формате"
+  echo "   Восстанавливается с помощью pg_restore"
+  echo "-Z Сжимать резервную копию. Указывается степень сжатия от 0 до 9"
+  echo "-L Отключить логирование"
+  echo "-c Количество хранимых копий"
+  echo "-i Только базы данных по списку"
+  echo "-e Исключить базы данных по списку"
+  echo "-r Резервное копирование на удаленный хост по ssh"
+  echo "-h Файл, из которого считывается ssh индентификатор (закрытый ключ) для проверки подлинности"
+  echo
+  exit 1
+fi
+
+backup_dir=${params[0]}
+
+if [[ $remotehost ]]
+then
+  if [[ -z $SSH_KEY ]]; then si=""; else si=" -i $SSH_KEY"; fi
+  if [[ $opt_C -eq 0 ]]; then sC=""; else sC=" -C"; fi
+  scmdr="ssh$si$sC $remotehost "
+  echo "Проверка соединения с удаленным хостом $remotehost по ssh" | wlog
+  ${scmdr}exit
+  if [[ $? -ne 0 ]]
+  then
+    echo "ERR: Удаленный хост $remotehost не доступен или не настроено безпарольное соединение по ssh" | wlog
+    exit 1
+  fi
+else
+  scmdr="bash -c "
+fi
+if [[ $opt_Z -eq 0 ]]; then pZ=""; else pZ=" -Z $opt_Z"; fi
+if [[ $opt_F -eq 0 ]]; then pF=""; else pF=" -Fc"; fi
+
+if ! ${scmdr}"test -d $backup_dir/"; then echo "ERR: Не найдена папка для резервных копий $backup_dir" | wlog; exit 1; fi
+
+if [[ -n $incl ]]; then gf1="grep -E -w -i $(echo $incl | tr -s ' ' '|')"; else gf1="cat"; fi
+if [[ -n $excl ]]; then gf2="grep -v -E -w -i $(echo $excl | tr -s ' ' '|')"; else gf2="cat"; fi
+gf3="grep -v -E -w -i $(echo 'postgres template.*' | tr -s ' ' '|')"
+cd /tmp
+dbs=$(sudo -u postgres psql -U postgres -c "SELECT datname FROM pg_database;" | grep . | awk '{print $1}' | sed '1,2d'  | sed '$d' | $gf1 | $gf2 | $gf3)
+
+for activedb in $dbs
+do
+  echo "DB: $activedb" | wlog
+
+  if ! ${scmdr}"test -d $backup_dir/$activedb/"
+  then
+    echo "Создание папки для копий \'$backup_dir/$activedb\'" | wlog
+    ${scmdr}"mkdir -p $backup_dir/$activedb" 2>&1 | wlog
+    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then echo "ERR: Ошибка при создании папки \'$backup_dir/$activedb\'" | wlog; exit 1; fi
+  fi
+
+  data=$(date_format)
+  echo "Создание резервной копии \'$backup_dir/$activedb/$activedb-$data.dump\'" | wlog
+  sudo -u postgres pg_dump$pZ$pF $activedb 2> >(wlog >&2) | ${scmdr}"cat - > $backup_dir/$activedb/$activedb-$data.dump" 2>&1 | wlog
+  err0=${PIPESTATUS[0]}
+  err1=${PIPESTATUS[1]}
+  if [[ $err0 -ne 0 ]] || [[ $err1 -ne 0 ]]
+  then
+    echo "ERR: Ошибка при создании резервной копии \'$backup_dir/$activedb/$activedb-$data.dump\'" | wlog
+  else
+    echo "Удаление устаревших копий" | wlog
+    ${scmdr}"ls -rd $backup_dir/$activedb/$activedb-20[0-3][0-9]-[0-1][0-9]-[0-3][0-9]-[0-2][0-9][0-5][0-9][0-5][0-9].dump" | tail -n +$(($cc+1)) | xargs -r ${scmdr}"rm -rv" 2>&1 | wlog
+  fi
+done
+
+echo "Резервное копирование завершено" | wlog
