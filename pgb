@@ -5,6 +5,7 @@ opt_C=0
 opt_F=0
 opt_L=0
 opt_Z=0
+opt_d=0
 cc=21
 incl=""
 excl=""
@@ -19,6 +20,7 @@ do
     -C) opt_C=1;;
     -F) opt_F=1;;
     -L) opt_L=1;;
+    -d) opt_d=1;;
     -Z) opt_Z="$2"; re='^[0-9]$'
         if ! [[ $opt_Z =~ $re ]]; then echo "ERR: Неверно указана степень сжатия копии"; opt_err=1; fi
         shift;;
@@ -59,14 +61,17 @@ then
   echo "Резервное копирование баз данных PostgreSQL"
   echo
   echo "Команда:"
-  echo "pgb [-C] [-L] [-Z <compress level>] [-c <countcopies>] [-r <remotehost>] [-h <identifyfile>] [-i \"<db1> [<db2>...[<dbN>]]\"] [-e \"<db1> [<db2>...[<dbN>]]\"] <backupdir>"
+  echo "pgb [-C] [-L] [-d] [-Z <compress level>] [-c <countcopies>] [-r <remotehost>] [-h <identifyfile>] [-i \"<db1> [<db2>...[<dbN>]]\"] [-e \"<db1> [<db2>...[<dbN>]]\"] <backupdir>"
   echo "-C Сжимать данные при передаче на удаленный хост"
   echo "   Актуально для несжатых данных и низкоскоростных каналов передачи"
-  echo "-F Сохранить в специальном сжатом gzip формате"
+  echo "-F Выгрузить в специальном архивном формате. Вывод сжимается gzip"
   echo "   Восстанавливается с помощью pg_restore"
   echo "-Z Сжимать резервную копию. Указывается степень сжатия от 0 до 9"
   echo "-L Отключить логирование"
   echo "-c Количество хранимых копий"
+  echo "-d Включить в выходной файл команды удаления (DROP) объектов базы данных"
+  echo "   перед командами создания (CREATE) этих объектов (--if-exists)"
+  echo "   Не применяется для специального архивного формата"
   echo "-i Только базы данных по списку"
   echo "-e Исключить базы данных по списку"
   echo "-r Резервное копирование на удаленный хост по ssh"
@@ -94,6 +99,8 @@ else
 fi
 if [[ $opt_Z -eq 0 ]]; then pZ=""; else pZ=" -Z $opt_Z"; fi
 if [[ $opt_F -eq 0 ]]; then pF=""; else pF=" -Fc"; fi
+if [[ $opt_d -eq 0 ]]; then pd=""; else pd=" -c --if-exists"; fi
+if [[ $opt_F -ne 0 ]]; then ext=".pgdmp"; elif [[ $opt_Z -ne 0 ]]; then ext=".sql.gz"; else ext=".sql"; fi
 
 if ! ${scmdr}"test -d $backup_dir/"; then echo "ERR: Не найдена папка для резервных копий $backup_dir" | wlog; exit 1; fi
 
@@ -115,16 +122,16 @@ do
   fi
 
   data=$(date_format)
-  echo "Создание резервной копии \'$backup_dir/$activedb/$activedb-$data.dump\'" | wlog
-  sudo -u postgres pg_dump$pZ$pF $activedb 2> >(wlog >&2) | ${scmdr}"cat - > $backup_dir/$activedb/$activedb-$data.dump" 2>&1 | wlog
+  echo "Создание резервной копии \'$backup_dir/$activedb/$activedb-$data$ext\'" | wlog
+  sudo -u postgres pg_dump$pZ$pF$pd $activedb 2> >(wlog >&2) | ${scmdr}"cat - > $backup_dir/$activedb/$activedb-$data$ext" 2>&1 | wlog
   err0=${PIPESTATUS[0]}
   err1=${PIPESTATUS[1]}
   if [[ $err0 -ne 0 ]] || [[ $err1 -ne 0 ]]
   then
-    echo "ERR: Ошибка при создании резервной копии \'$backup_dir/$activedb/$activedb-$data.dump\'" | wlog
+    echo "ERR: Ошибка при создании резервной копии \'$backup_dir/$activedb/$activedb-$data$ext\'" | wlog
   else
     echo "Удаление устаревших копий" | wlog
-    ${scmdr}"ls -rd $backup_dir/$activedb/$activedb-20[0-3][0-9]-[0-1][0-9]-[0-3][0-9]-[0-2][0-9][0-5][0-9][0-5][0-9].dump" | tail -n +$(($cc+1)) | xargs -r ${scmdr}"rm -rv" 2>&1 | wlog
+    ${scmdr}"ls -rd $backup_dir/$activedb/$activedb-20[0-3][0-9]-[0-1][0-9]-[0-3][0-9]-[0-2][0-9][0-5][0-9][0-5][0-9]$ext" | tail -n +$(($cc+1)) | xargs -r ${scmdr}"rm -rv" 2>&1 | wlog
   fi
 done
 
