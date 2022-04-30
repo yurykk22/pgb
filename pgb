@@ -86,7 +86,8 @@ if [[ $remotehost ]]
 then
   if [[ -z $SSH_KEY ]]; then si=""; else si=" -i $SSH_KEY"; fi
   if [[ $opt_C -eq 0 ]]; then sC=""; else sC=" -C"; fi
-  scmdr="ssh$si$sC $remotehost "
+  so=" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+  scmdr="ssh$si$sC$so $remotehost "
   echo "Проверка соединения с удаленным хостом $remotehost по ssh" | wlog
   ${scmdr}exit
   if [[ $? -ne 0 ]]
@@ -104,9 +105,9 @@ if [[ $opt_F -ne 0 ]]; then ext=".pgdmp"; elif [[ $opt_Z -ne 0 ]]; then ext=".sq
 
 if ! ${scmdr}"test -d $backup_dir/"; then echo "ERR: Не найдена папка для резервных копий $backup_dir" | wlog; exit 1; fi
 
-if [[ -n $incl ]]; then gf1="grep -E -w -i $(echo $incl | tr -s ' ' '|')"; else gf1="cat"; fi
-if [[ -n $excl ]]; then gf2="grep -v -E -w -i $(echo $excl | tr -s ' ' '|')"; else gf2="cat"; fi
-gf3="grep -v -E -w -i $(echo 'postgres template.*' | tr -s ' ' '|')"
+if [[ -n $incl ]]; then gf1="grep -E -w -i $(echo ^$incl$ | tr -s ' ' '|' | sed 's/|/$|^/g')"; else gf1="cat"; fi
+if [[ -n $excl ]]; then gf2="grep -v -E -w -i $(echo ^$excl$ | tr -s ' ' '|' | sed 's/|/$|^/g')"; else gf2="cat"; fi
+gf3="grep -v -E -w -i $(echo '^postgres$|^template.*$')"
 cd /tmp
 dbs=$(sudo -u postgres psql -U postgres -c "SELECT datname FROM pg_database;" | grep . | awk '{print $1}' | sed '1,2d'  | sed '$d' | $gf1 | $gf2 | $gf3)
 
